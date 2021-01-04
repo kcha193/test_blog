@@ -1,0 +1,359 @@
+---
+title: "First post"
+author: "Kevin Chang"
+date: 2021-01-05
+categories: R
+tags:
+- R Markdown
+- plot
+- regression
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+
+library(httr)
+library(lubridate)
+library(tidyverse)
+
+```
+
+This blog post is to demonstrate how to extract the latest data set from a github repository and generate bar chart using ggplot2 R package. 
+
+# Link to the github repository
+
+```{r link_git}
+req <- GET("https://api.github.com/repos/CSSEGISandData/COVID-19/git/trees/master?recursive=1")
+
+filelist <- unlist(lapply(content(req)$tree, "[", "path"), use.names = F)
+
+filelist <- 
+  grep("csse_covid_19_data/csse_covid_19_daily_reports/([0-9])",
+     filelist, value = TRUE)
+
+```
+
+All file names are stored in the `filelist` object, which looks something like below
+
+```{r, echo = FALSE}
+head(filelist, 3)
+```
+
+# Extract the latest date
+
+We can get the list of dates from the file names above by 
+
+```{r, eval=FALSE}
+basename(filelist)
+```
+
+```{r, echo=FALSE}
+head(basename(filelist), 3)
+```
+
+Since these are still as character, we can convert these file names to `dates` by using `mdy()` function in the `lubridate` R package, which parse dates with, **m**onth, **d**ay and **y**ear components (in this order), i.e. 
+
+```{r, eval=FALSE}
+mdy(basename(filelist))
+```
+
+```{r, echo=FALSE}
+head(mdy(basename(filelist)), 3)
+```
+
+Thus, we can get the lastest date from the avalible data set in the reposiity using the `max()` function across all the dates, i.e.
+
+```{r}
+dates <-  mdy(basename(filelist))
+
+max(dates, na.rm = TRUE)
+```
+
+We can get the previous date from this laest date by taking away one, i.e. 
+
+```{r}
+max(dates, na.rm = TRUE) - 1
+```
+
+
+
+# Extract the latest data set 
+
+Once we obtain the latest dates, we can use this as the name of the file names to read-in the latest COVID-19 data. 
+
+```{r}
+latest_daily_cases <-
+  read_csv(
+    paste0(
+      "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/",
+      filelist[which(dates == max(dates, na.rm = TRUE))]
+    )
+  )
+
+
+```
+
+```{r}
+previous_daily_cases <-
+  read_csv(
+    paste0(
+      "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/",
+      filelist[which(dates == (max(dates, na.rm = TRUE) - 1))]
+    )
+  )
+```
+
+# Tidy up the date
+
+Current data set has broken down into different states, since we are only interest the records of different countries, we will need to aggregate these number accordingly, i.e. 
+
+```{r}
+latest_daily_cases_total <-
+  latest_daily_cases %>%
+  select(Country_Region, Confirmed:Active) %>%
+  rename(Country = Country_Region) %>%
+  pivot_longer(Confirmed:Active, names_to = "Type", values_to = "Count") %>%
+  group_by(Country, Type) %>%
+  summarise(Count_lastest = sum(Count, ne.rm = TRUE), .groups = "drop")
+
+previous_daily_cases_total <-
+  previous_daily_cases %>%
+  select(Country_Region, Confirmed:Active) %>%
+  rename(Country = Country_Region) %>%
+  pivot_longer(Confirmed:Active, names_to = "Type", values_to = "Count") %>%
+  group_by(Country, Type) %>%
+  summarise(Count_previous = sum(Count, ne.rm = TRUE), .groups = "drop")
+```
+
+
+Combine these two data set and compute the differences for plotting
+
+```{r}
+daily_cases_total <- 
+  latest_daily_cases_total %>% 
+  left_join(previous_daily_cases_total) %>% 
+  mutate(Count_change = Count_lastest - Count_previous)
+```
+
+# Table outputs
+
+
+## Overall 
+
+```{r}
+daily_cases_total %>%
+  group_by(Type) %>%
+  summarise("Lastest" = sum(Count_lastest, na.rm = TRUE), 
+            "Changes" = sum(Count_change, na.rm = TRUE), 
+            .groups = "drop") %>% 
+  arrange(-Lastest) %>%
+  gt::gt() %>% 
+  gt::fmt_number(2:3, suffixing = TRUE)
+```
+
+## US 
+
+```{r}
+daily_cases_total %>% 
+  filter(Country == "US") %>%
+  group_by(Type) %>%
+  summarise("Lastest" = sum(Count_lastest, na.rm = TRUE), 
+            "Changes" = sum(Count_change, na.rm = TRUE), 
+            .groups = "drop") %>% 
+  arrange(-Lastest) %>%
+  gt::gt() %>% 
+  gt::fmt_number(2:3, suffixing = TRUE)
+```
+
+## United Kingdom 
+
+```{r}
+
+
+daily_cases_total %>% 
+  filter(Country == "United Kingdom") %>%
+  group_by(Type) %>%
+  summarise("Lastest" = sum(Count_lastest, na.rm = TRUE), 
+            "Changes" = sum(Count_change, na.rm = TRUE), 
+            .groups = "drop") %>% 
+  arrange(-Lastest) %>%
+  gt::gt() %>% 
+  gt::fmt_number(2:3, suffixing = TRUE)
+```
+
+
+# Bar chart
+
+## Confirmed Cases
+
+```{r}
+top <- 20
+
+max_y <-
+  daily_cases_total %>%
+  filter(Type == "Confirmed") %>% pull(Count_lastest) %>% max(na.rm = TRUE)
+
+daily_cases_total %>% 
+  filter(Type == "Confirmed") %>% 
+  arrange(-Count_lastest) %>% 
+  mutate(Country = forcats::fct_reorder(Country, Count_lastest))%>% 
+  slice_head(n = top) %>% 
+  ggplot(aes(x = Country, y = Count_lastest, 
+             label = paste0(round(Count_lastest/1e6,1), "M", 
+                            "(+", round(Count_change/1e3, 1), "K)"))) +
+  geom_col() +
+  geom_text(hjust = 0, fontface = "bold") + 
+  scale_y_continuous(labels = scales::comma, limits = c(0, max_y * 1.2)) +
+  labs(y = "Total number of Confirmed Covid-19 cases", x = "") +
+  theme_classic()+
+  coord_flip() 
+```
+
+
+
+```{r}
+daily_cases_total %>% 
+  filter(Type == "Confirmed") %>% 
+  arrange(-Count_change) %>% 
+  mutate(Country = forcats::fct_reorder(Country, Count_change))%>% 
+  slice_head(n = top) %>% 
+  ggplot(aes(x = Country, y = Count_lastest, 
+             label = paste0(round(Count_lastest/1e6,1), "M", 
+                            "(+", round(Count_change/1e3, 1), "K)"))) +
+  geom_col() +
+  geom_text(hjust = 0, fontface = "bold") + 
+  scale_y_continuous(labels = scales::comma, limits = c(0, max_y * 1.2)) +
+  labs(y = "Total number of Confirmed Covid-19 cases", x = "") +
+  theme_classic()+
+  coord_flip() 
+```
+
+
+
+## Active Cases
+
+```{r, echo=FALSE}
+max_y <-
+  daily_cases_total %>%
+  filter(Type == "Active") %>% pull(Count_lastest) %>% max(na.rm = TRUE)
+
+daily_cases_total %>% 
+  filter(Type == "Active") %>% 
+  arrange(-Count_lastest) %>% 
+  mutate(Country = forcats::fct_reorder(Country, Count_lastest))%>% 
+  slice_head(n = top) %>% 
+  ggplot(aes(x = Country, y = Count_lastest, 
+             label = paste0(round(Count_lastest/1e6,1), "M", 
+                            "(+", round(Count_change/1e3, 1), "K)"))) +
+  geom_col() +
+  geom_text(hjust = 0, fontface = "bold") + 
+  scale_y_continuous(labels = scales::comma, limits = c(0, max_y * 1.2)) +
+  labs(y = "Total number of Active Covid-19 cases", x = "") +
+  theme_classic()+
+  coord_flip() 
+```
+
+
+```{r, echo=FALSE}
+daily_cases_total %>% 
+  filter(Type == "Active") %>% 
+  arrange(-Count_change) %>% 
+  mutate(Country = forcats::fct_reorder(Country, Count_change))%>% 
+  slice_head(n = top) %>% 
+  ggplot(aes(x = Country, y = Count_lastest, 
+             label = paste0(round(Count_lastest/1e6,1), "M", 
+                            "(+", round(Count_change/1e3, 1), "K)"))) +
+  geom_col() +
+  geom_text(hjust = 0, fontface = "bold") + 
+  scale_y_continuous(labels = scales::comma, limits = c(0, max_y * 1.2)) +
+  labs(y = "Total number of Confirmed Covid-19 cases", x = "") +
+  theme_classic()+
+  coord_flip() 
+```
+
+
+## Deaths
+
+```{r, echo=FALSE}
+max_y <-
+  daily_cases_total %>%
+  filter(Type == "Deaths") %>% pull(Count_lastest) %>% max(na.rm = TRUE)
+
+daily_cases_total %>% 
+  filter(Type == "Deaths") %>% 
+  arrange(-Count_lastest) %>% 
+  mutate(Country = forcats::fct_reorder(Country, Count_lastest))%>% 
+  slice_head(n = top) %>% 
+  ggplot(aes(x = Country, y = Count_lastest, 
+             label = paste0(round(Count_lastest/1e3,1), "K", 
+                            "(+", Count_change, ")"))) +
+  geom_col() +
+  geom_text(hjust = 0, fontface = "bold") + 
+  scale_y_continuous(labels = scales::comma, limits = c(0, max_y * 1.2)) +
+  labs(y = "Total number of Covid-19 Deaths", x = "") +
+  theme_classic()+
+  coord_flip() 
+```
+
+
+```{r, echo=FALSE}
+daily_cases_total %>% 
+  filter(Type == "Deaths") %>% 
+  arrange(-Count_change) %>% 
+  mutate(Country = forcats::fct_reorder(Country, Count_change))%>% 
+  slice_head(n = top) %>% 
+  ggplot(aes(x = Country, y = Count_lastest, 
+             label = paste0(round(Count_lastest/1e3,1), "K", 
+                            "(+", Count_change, ")"))) +
+  geom_col() +
+  geom_text(hjust = 0, fontface = "bold") + 
+  scale_y_continuous(labels = scales::comma, limits = c(0, max_y * 1.2)) +
+  labs(y = "Total number of Covid-19 Deaths", x = "") +
+  theme_classic()+
+  coord_flip() 
+```
+
+
+## Recovered
+
+```{r, echo=FALSE}
+
+max_y <-
+  daily_cases_total %>%
+  filter(Type == "Recovered") %>% pull(Count_lastest) %>% max(na.rm = TRUE)
+
+daily_cases_total %>% 
+  filter(Type == "Recovered") %>% 
+  arrange(-Count_lastest) %>% 
+  mutate(Country = forcats::fct_reorder(Country, Count_lastest))%>% 
+  slice_head(n = top) %>% 
+  ggplot(aes(x = Country, y = Count_lastest, 
+             label = paste0(round(Count_lastest/1e6,1), "M", 
+                            "(+", round(Count_change/1e3, 1), "K)"))) +
+  geom_col() +
+  geom_text(hjust = 0, fontface = "bold") + 
+  scale_y_continuous(labels = scales::comma, limits = c(0, max_y * 1.2)) +
+  labs(y = "Total number of Covid-19 Recovered", x = "") +
+  theme_classic()+
+  coord_flip() 
+
+```
+
+
+```{r, echo=FALSE}
+daily_cases_total %>% 
+  filter(Type == "Recovered") %>% 
+  arrange(-Count_change) %>% 
+  mutate(Country = forcats::fct_reorder(Country, Count_change))%>% 
+  slice_head(n = top) %>% 
+  ggplot(aes(x = Country, y = Count_lastest, 
+             label = paste0(round(Count_lastest/1e6,1), "M", 
+                            "(+", round(Count_change/1e3, 1), "K)"))) +
+  geom_col() +
+  geom_text(hjust = 0, fontface = "bold") + 
+  scale_y_continuous(labels = scales::comma, limits = c(0, max_y * 1.2)) +
+  labs(y = "Total number of Covid-19 Recovered", x = "") +
+  theme_classic()+
+  coord_flip() 
+```
+
